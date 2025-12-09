@@ -15,6 +15,7 @@ Features:
  - Run exactly N iterations to generate the iterations table
 """
 
+
 from typing import Callable, Dict, List, Optional, Any, Union
 import math
 import re
@@ -24,14 +25,9 @@ _SAFE_MATH: Dict[str, Any] = {
     name: getattr(math, name) for name in dir(math) if not name.startswith("_")
 }
 _SAFE_MATH.update({"pi": math.pi, "e": math.e, "abs": abs, "ln": math.log})
-# note: 'ln' alias -> natural log (math.log)
 
 
 # ---------------- EXPRESSION PREPROCESSOR ----------------
-from typing import Any, Dict, Optional, Callable, List, Union
-
-# ... keep your _SAFE_MATH etc ...
-
 def preprocess_expression(expr: str) -> str:
     """
     Convert user-friendly input into a valid Python expression.
@@ -76,16 +72,37 @@ def preprocess_expression(expr: str) -> str:
     return s
 
 
+# ---------------- find denominator expressions ----------------
+def find_denominator_expressions(processed_expr: str) -> List[str]:
+    """
+    Return list of denominator sub-expressions found after '/', e.g. for '1/(x-2)' returns ['(x-2)'].
+    The regex handles both '/(...)' and '/token' forms (like '/x', '/(x+1)', '/sin(x)').
+    """
+    denoms: List[str] = []
+    # match / ( ... )
+    for m in re.finditer(r"/\s*(\([^\)]+\))", processed_expr):
+        denoms.append(m.group(1))
+    # match /token (where token is functioncall or name/number)
+    for m in re.finditer(r"/\s*([A-Za-z0-9_\.]+(?:\([^\)]*\))?)", processed_expr):
+        token = m.group(1)
+        # avoid double-adding tokens already matched as parenthesized
+        if token.startswith("(") and token.endswith(")"):
+            continue
+        denoms.append(token)
+    # unique
+    uniq = []
+    for d in denoms:
+        if d not in uniq:
+            uniq.append(d)
+    return uniq
+
 
 # ---------------- MAKE FUNCTION (using preprocessor) ----------------
-def make_function(expr: str) -> Callable[[float], float]:
+def make_function_from_processed(processed: str) -> Callable[[float], float]:
     """
-    Build a callable f(x) from the user expression string.
-    Uses preprocess_expression then restricted eval with _SAFE_MATH.
-    Raises ValueError if compilation or evaluation fails.
+    Build a callable f(x) from a processed expression.
+    Raises ValueError if compilation/evaluation fails.
     """
-    processed = preprocess_expression(expr)
-    #processed = expr
     try:
         code = compile(processed, "<user_function>", "eval")
     except Exception as exc:
@@ -96,48 +113,64 @@ def make_function(expr: str) -> Callable[[float], float]:
             raw = eval(code, {"__builtins__": {}}, {**_SAFE_MATH, "x": x})
         except Exception as exc:
             raise ValueError(f"Function evaluation error at x={x}: {exc}")
-
         if isinstance(raw, complex):
             raise ValueError(f"Function returned complex value at x={x}: {raw}")
-
         try:
-            val: float = float(raw)  # type: ignore[arg-type]
+            val: float = float(raw)
         except Exception as exc:
             raise ValueError(f"Cannot convert function result to float at x={x}: {exc}")
-
         if math.isnan(val) or math.isinf(val):
             raise ValueError(f"Function produced non-finite value at x={x}: {val}")
-
         return val
 
     return f
 
 
-# ---------------- SAMPLING: definedness & continuity (typed) ----------------
-def sampling_defined_and_continuous(f: Callable[[float], float], a: float, b: float, samples: int = 200) -> bool:
+def make_function(expr: str) -> Callable[[float], float]:
+    processed = preprocess_expression(expr)
+    return make_function_from_processed(processed)
+
+
+# ---------------- SAMPLING: definedness & continuity ----------------
+def sampling_defined_and_continuous(
+    f: Callable[[float], float],
+    a: float,
+    b: float,
+    samples: int = 300,
+    max_abs_threshold: float = 1e8
+) -> bool:
     """
-    Sample f at `samples` points; return True if all finite and no extreme jumps detected.
+    Sample f at 'samples' points in [a,b].
+    Return False when:
+     - evaluation raises exception at a sample
+     - sample is NaN/Inf
+     - any sample abs(value) > max_abs_threshold (likely pole)
+     - relative jump between consecutive samples is enormous (heuristic discontinuity)
     """
     if a >= b:
         return False
     if samples < 2:
         samples = 2
 
-    step: float = (b - a) / (samples - 1)
+    step = (b - a) / (samples - 1)
     prev_val: Optional[float] = None
 
     for i in range(samples):
-        x: float = a + i * step
+        x = a + i * step
         try:
-            v: float = float(f(x))
+            v = float(f(x))
         except Exception:
             return False
 
         if math.isnan(v) or math.isinf(v):
             return False
 
+        if abs(v) > max_abs_threshold:
+            # treat very large magnitude as sign of singularity/asymptote in interval
+            return False
+
         if prev_val is not None:
-            denom: float = max(1.0, abs(prev_val))
+            denom = max(1.0, abs(prev_val))
             if abs(v - prev_val) / denom > 1e6:
                 return False
         prev_val = v
@@ -145,55 +178,41 @@ def sampling_defined_and_continuous(f: Callable[[float], float], a: float, b: fl
     return True
 
 
-# ---------------- SAMPLING: single-root heuristic (typed) ----------------
+# ---------------- SAMPLING: single-root heuristic ----------------
 def estimate_single_root(f: Callable[[float], float], a: float, b: float, samples: int = 500) -> bool:
-    """
-    Heuristic: count sign changes between consecutive samples (ignore near-zero).
-    Return True if exactly one sign change is found.
-    """
     if samples < 2:
         samples = 2
-
-    step: float = (b - a) / (samples - 1)
+    step = (b - a) / (samples - 1)
     prev_val: Optional[float] = None
-    sign_changes: int = 0
-
+    sign_changes = 0
     for i in range(samples):
-        x: float = a + i * step
+        x = a + i * step
         try:
-            v: float = float(f(x))
+            v = float(f(x))
         except Exception:
             return False
-
         if abs(v) < 1e-12:
             prev_val = None
             continue
-
         if prev_val is not None:
             if prev_val * v < 0:
                 sign_changes += 1
                 prev_val = None
                 continue
-
         prev_val = v
-
     return sign_changes == 1
 
 
 # ---------------- REQUIRED ITERATIONS (base-10) ----------------
 def compute_required_N(a: float, b: float, d: int) -> int:
-    """
-    Compute required N using base-10 logarithm formula and return ceil(RHS), non-negative.
-    """
     if b <= a:
         raise ValueError("b must be > a")
     if d < 0:
         raise ValueError("d must be >= 0")
-
-    width: float = b - a
-    numerator: float = math.log10(width) - math.log10(0.5 * 10 ** (-d))
-    denom: float = math.log10(2)
-    rhs: float = numerator / denom - 1.0
+    width = b - a
+    numerator = math.log10(width) - math.log10(0.5 * 10 ** (-d))
+    denom = math.log10(2)
+    rhs = numerator / denom - 1.0
     N = math.ceil(rhs)
     return max(N, 0)
 
@@ -207,56 +226,78 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
       - 'root', 'iterations', 'N_required', 'tol', 'converged_by_tol', 'workability', 'convergence_text', 'rate_text'
     On failure returns {'error': <message>}.
     """
-    # parse function
+    # preprocess and inspect denominators first (so we can report discontinuities earlier)
+    processed = preprocess_expression(func_str)
+
+    # find denominators (strings)
+    denom_strs = find_denominator_expressions(processed)
+    if denom_strs:
+        # for each denominator substring, build a function and test if it has a zero in [a,b]
+        for ds in denom_strs:
+            # remove surrounding parentheses for make_function correctness if present
+            ds_clean = ds
+            try:
+                # build denominator function (we preprocess inside make_function)
+                g = make_function_from_processed(ds_clean.strip("()"))
+            except Exception:
+                # if compilation fails for denom - be conservative and treat as possibly problematic
+                return {"error": f"Denominator expression '{ds}' could not be analyzed (potential discontinuity)."}
+
+            # test g for zero (root) inside [a,b] via sampling (coarse)
+            # if g changes sign or produces zero -> denominator zero inside
+            try:
+                step = (b - a) / 400  # dense-ish sampling for denominators
+                prev_val: Optional[float] = None
+                for i in range(401):
+                    x = a + i * step
+                    try:
+                        gv = g(x)
+                    except Exception:
+                        # evaluation failure indicates discontinuity at that sample
+                        return {"error": f"Denominator '{ds}' not defined at x={x} inside interval."}
+                    if abs(gv) < 1e-12:
+                        return {"error": f"Denominator '{ds}' is zero at x={x} inside interval -> discontinuity."}
+                    if prev_val is not None and prev_val * gv < 0:
+                        return {"error": f"Denominator '{ds}' changes sign inside interval -> zero exists -> discontinuity."}
+                    prev_val = gv
+            except Exception as exc:
+                return {"error": f"Error analyzing denominator '{ds}': {exc}"}
+
+    # now build main function
     try:
-        f: Callable[[float], float] = make_function(func_str)
+        f = make_function_from_processed(processed)
     except ValueError as exc:
         return {"error": f"parse_error: {exc}"}
 
-    # sampling-definedness
+    # sampling-definedness with threshold
     try:
-        if not sampling_defined_and_continuous(f, a, b):
-            return {"error": "Function is not defined/continuous on [a,b] (sampling failure)."}
+        if not sampling_defined_and_continuous(f, a, b, samples=300, max_abs_threshold=1e8):
+            return {"error": "Function is not defined/continuous on [a,b] (sampling/discontinuity detected)."}
     except Exception as exc:
         return {"error": f"sampling_error: {exc}"}
 
     # evaluate endpoints
     try:
-        fa: float = float(f(a))
+        fa = float(f(a))
     except Exception as exc:
         return {"error": f"evaluation_error_at_a: {exc}"}
-
     try:
-        fb: float = float(f(b))
+        fb = float(f(b))
     except Exception as exc:
         return {"error": f"evaluation_error_at_b: {exc}"}
 
-    # endpoint root
+    # endpoint roots
     if abs(fa) <= 1e-15:
-        return {
-            "root": float(a),
-            "iterations": [],
-            "N_required": 0,
-            "tol": 10 ** (-d),
-            "converged_by_tol": True,
-            "workability": "Exact root at left endpoint (a).",
-            "convergence_text": "If f(a)==0 then a is a root; bisection is not required.",
-            "rate_text": ""
-        }
+        return {"root": float(a), "iterations": [], "N_required": 0, "tol": 10 ** (-d),
+                "converged_by_tol": True, "workability": "Exact root at left endpoint (a).",
+                "convergence_text": "If f(a)==0 then a is a root; bisection is not required.", "rate_text": ""}
 
     if abs(fb) <= 1e-15:
-        return {
-            "root": float(b),
-            "iterations": [],
-            "N_required": 0,
-            "tol": 10 ** (-d),
-            "converged_by_tol": True,
-            "workability": "Exact root at right endpoint (b).",
-            "convergence_text": "If f(b)==0 then b is a root; bisection is not required.",
-            "rate_text": ""
-        }
+        return {"root": float(b), "iterations": [], "N_required": 0, "tol": 10 ** (-d),
+                "converged_by_tol": True, "workability": "Exact root at right endpoint (b).",
+                "convergence_text": "If f(b)==0 then b is a root; bisection is not required.", "rate_text": ""}
 
-    # sign change requirement
+    # sign change test
     if fa * fb > 0:
         return {"error": "No sign change at endpoints: f(a) * f(b) > 0. Bisection cannot be applied."}
 
@@ -269,19 +310,17 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
 
     # compute N
     try:
-        N_required: int = compute_required_N(a, b, d)
+        N_required = compute_required_N(a, b, d)
     except Exception as exc:
         return {"error": f"N_calculation_failed: {exc}"}
 
     tol: float = 10 ** (-d)
     iterations: List[Dict[str, Union[int, float, None]]] = []
-
-    # pre-initialize p to satisfy linters
     p: Optional[float] = None
     prev_p: Optional[float] = None
-    left: float = a
-    right: float = b
-    converged_by_tol: bool = False
+    left = a
+    right = b
+    converged_by_tol = False
 
     if N_required == 0:
         return {
@@ -294,45 +333,31 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
             "convergence_text": "",
             "rate_text": ""
         }
-
+    
     # run exactly N_required iterations
     for n in range(1, N_required + 1):
         p = 0.5 * (left + right)
         try:
-            fp: float = float(f(p))
+            fp = float(f(p))
         except Exception as exc:
             return {"error": f"evaluation_error_at_iteration_p: {exc}"}
-
-        err: Optional[float] = None if prev_p is None else abs(p - prev_p)
-
-        iterations.append({
-            "n": n,
-            "a": float(left),
-            "b": float(right),
-            "p": float(p),
-            "f(p)": float(fp),
-            "error": err
-        })
-
-        # re-evaluate fa (safe and keeps logic similar to your original)
+        err = None if prev_p is None else abs(p - prev_p)
+        iterations.append({"n": n, "a": float(left), "b": float(right), "p": float(p), "f(p)": float(fp), "error": err})
         try:
             fa = float(f(left))
         except Exception as exc:
             return {"error": f"evaluation_error_at_left_during_iteration: {exc}"}
-
         if fa * fp < 0:
             right = p
             fb = fp
         else:
             left = p
             fa = fp
-
         if err is not None and err < tol:
             converged_by_tol = True
-
         prev_p = p
 
-    final_root: Optional[float] = float(p) if p is not None else None
+    final_root = float(p) if p is not None else None
 
     return {
         "root": final_root,
@@ -352,10 +377,10 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
         )
     }
 
-
 # ---------------- self-test ----------------
 if __name__ == "__main__":
     from pprint import pprint
-    demo = bisection("xsinx-1", 0.0, 2.0, 8)
-    pprint(demo)
-
+    # discontinuous example:
+    pprint(bisection("1/(x-2)", 1.0, 7.0, 6))
+    # continuous example:
+    pprint(bisection("xsinx - 1", 0.0, 2.0, 8))
