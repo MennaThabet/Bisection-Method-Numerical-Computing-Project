@@ -179,27 +179,43 @@ def sampling_defined_and_continuous(
 
 
 # ---------------- SAMPLING: single-root heuristic ----------------
-def estimate_single_root(f: Callable[[float], float], a: float, b: float, samples: int = 500) -> bool:
+def estimate_single_root(f: Callable[[float], float], a: float, b: float, samples: int = 500) -> Optional[bool]:
+    """
+    Heuristic: count sign changes between consecutive samples (ignore near-zero).
+    Returns:
+      - True  => exactly one sign change seen (likely single root)
+      - False => multiple/no sign changes seen (ambiguous)
+      - None  => evaluation error during sampling (treat as ambiguous)
+    NOTE: This function is only a heuristic; bisection will proceed when endpoints have sign change.
+    """
     if samples < 2:
         samples = 2
+
     step = (b - a) / (samples - 1)
     prev_val: Optional[float] = None
     sign_changes = 0
-    for i in range(samples):
-        x = a + i * step
-        try:
-            v = float(f(x))
-        except Exception:
-            return False
-        if abs(v) < 1e-12:
-            prev_val = None
-            continue
-        if prev_val is not None:
-            if prev_val * v < 0:
-                sign_changes += 1
+    try:
+        for i in range(samples):
+            x = a + i * step
+            try:
+                v = float(f(x))
+            except Exception:
+                return None  # sampling failed -> ambiguous
+            # do not aggressively ignore small values; treat near-zero as exact zero only when very small
+            if abs(v) < 1e-18:
+                # exact sample root detected -> count as sign-change boundary
                 prev_val = None
+                sign_changes += 1
                 continue
-        prev_val = v
+            if prev_val is not None:
+                if prev_val * v < 0:
+                    sign_changes += 1
+                    prev_val = None
+                    continue
+            prev_val = v
+    except Exception:
+        return None
+
     return sign_changes == 1
 
 
@@ -234,26 +250,20 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
     if denom_strs:
         # for each denominator substring, build a function and test if it has a zero in [a,b]
         for ds in denom_strs:
-            # remove surrounding parentheses for make_function correctness if present
             ds_clean = ds
             try:
-                # build denominator function (we preprocess inside make_function)
                 g = make_function_from_processed(ds_clean.strip("()"))
             except Exception:
-                # if compilation fails for denom - be conservative and treat as possibly problematic
                 return {"error": f"Denominator expression '{ds}' could not be analyzed (potential discontinuity)."}
 
-            # test g for zero (root) inside [a,b] via sampling (coarse)
-            # if g changes sign or produces zero -> denominator zero inside
             try:
-                step = (b - a) / 400  # dense-ish sampling for denominators
+                step = (b - a) / 400
                 prev_val: Optional[float] = None
                 for i in range(401):
                     x = a + i * step
                     try:
                         gv = g(x)
                     except Exception:
-                        # evaluation failure indicates discontinuity at that sample
                         return {"error": f"Denominator '{ds}' not defined at x={x} inside interval."}
                     if abs(gv) < 1e-12:
                         return {"error": f"Denominator '{ds}' is zero at x={x} inside interval -> discontinuity."}
@@ -302,11 +312,18 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
         return {"error": "No sign change at endpoints: f(a) * f(b) > 0. Bisection cannot be applied."}
 
     # single-root heuristic
+    single_root_info = ""
     try:
-        if not estimate_single_root(f, a, b):
-            return {"error": "Interval does not appear to contain a single root (sampling estimate)."}
+        sr = estimate_single_root(f, a, b)
+        if sr is True:
+            single_root_info = "Single-root sampling estimate passed."
+        elif sr is False:
+            # multiple or zero sign changes by sampling, but endpoints have sign change -> proceed with caution
+            single_root_info = "Warning: sampling suggests multiple/ambiguous roots inside interval. Proceeding because f(a)*f(b)<0."
+        else:
+            single_root_info = "Warning: sampling for single-root estimate was unreliable."
     except Exception as exc:
-        return {"error": f"root_estimate_error: {exc}"}
+        single_root_info = f"Warning: root estimation error ignored: {exc}"
 
     # compute N
     try:
@@ -329,7 +346,7 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
             "N_required": 0,
             "tol": tol,
             "converged_by_tol": False,
-            "workability": "N_required == 0 (no iterations performed).",
+            "workability": f"N_required == 0 (no iterations performed). {single_root_info}",
             "convergence_text": "",
             "rate_text": ""
         }
@@ -365,7 +382,7 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
         "N_required": N_required,
         "tol": tol,
         "converged_by_tol": converged_by_tol,
-        "workability": "Valid: continuous (sampled), sign change, single-root estimate passed.",
+        "workability": f"Valid: continuous (sampled), sign change passed. {single_root_info}",
         "convergence_text": (
             "Convergence: If f is continuous on [a,b] and f(a)*f(b)<0, the Intermediate Value Theorem "
             "guarantees at least one root. Bisection halves the bracket each iteration and therefore "
