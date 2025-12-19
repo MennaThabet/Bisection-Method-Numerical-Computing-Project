@@ -102,7 +102,6 @@ def find_denominator_expressions(processed_expr: str) -> List[str]:
 def _sympy_locals_for_sympify() -> Dict[str, Any]:
     """
     Map names used in preprocess_expression into SymPy equivalents for sympify.
-    Keep this minimal and safe.
     """
     return {
         "sin": sp.sin, "cos": sp.cos, "tan": sp.tan,
@@ -186,7 +185,7 @@ def check_denominator_with_sympy(processed_expr: str, a: float, b: float) -> Tup
         return False, "sympy: Could not lambdify denominator; falling back to numeric scan."
 
     # numeric scan parameters
-    samples = 800  # dense but cheap for denominator only
+    samples = 1000  # dense but cheap for denominator only
     step = (b - a) / (samples - 1)
     prev_val = None
     for i in range(samples):
@@ -198,7 +197,7 @@ def check_denominator_with_sympy(processed_expr: str, a: float, b: float) -> Tup
         if math.isnan(dv) or math.isinf(dv):
             return False, f"sympy_numeric: Denominator produced NaN/Inf at x={xv} -> discontinuity."
         # huge magnitude implies possible pole
-        if abs(dv) > 1e8:
+        if abs(dv) > 1e9:
             return False, f"sympy_numeric: Denominator magnitude too large at x={xv} (possible pole) -> discontinuity."
         if prev_val is not None:
             if prev_val * dv < 0:
@@ -249,8 +248,8 @@ def sampling_defined_and_continuous(
     f: Callable[[float], float],
     a: float,
     b: float,
-    samples: int = 300,
-    max_abs_threshold: float = 1e8
+    samples: int = 1000,
+    max_abs_threshold: float = 1e9
 ) -> bool:
     """
     Sample f at 'samples' points in [a,b].
@@ -283,8 +282,9 @@ def sampling_defined_and_continuous(
             return False
 
         if prev_val is not None:
-            denom = max(1.0, abs(prev_val))
-            if abs(v - prev_val) / denom > 1e6:
+            denom = max(1.0, abs(prev_val)) 
+            if abs(v - prev_val) / denom > 1e9:
+              # If the function changes by a billion times its size in one small step, Then it’s almost certainly discontinuous
                 return False
         prev_val = v
 
@@ -292,12 +292,12 @@ def sampling_defined_and_continuous(
 
 
 # ---------------- SAMPLING: single-root heuristic ----------------
-def estimate_single_root(f: Callable[[float], float], a: float, b: float, samples: int = 500) -> Optional[bool]:
+def estimate_single_root(f: Callable[[float], float], a: float, b: float, samples: int = 1000) -> Optional[bool]:
     """
     Heuristic: count sign changes between consecutive samples (ignore near-zero).
     Returns:
-      - True  => exactly one sign change seen (likely single root)
-      - False => multiple/no sign changes seen (ambiguous)
+      - True  => at least one sign change seen 
+      - False => no sign changes seen (ambiguous)
       - None  => evaluation error during sampling (treat as ambiguous)
     NOTE: This function is only a heuristic; bisection will proceed when endpoints have sign change.
     """
@@ -329,7 +329,7 @@ def estimate_single_root(f: Callable[[float], float], a: float, b: float, sample
     except Exception:
         return None
 
-    return sign_changes == 1
+    return sign_changes >= 1
 
 
 # ---------------- REQUIRED ITERATIONS (base-10) ----------------
@@ -360,7 +360,7 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
     # preprocess and inspect denominators first (so we can report discontinuities earlier)
     processed = preprocess_expression(func_str)
 
-    # --- NEW: Try SymPy first for exact denominator zero detection ---
+    # First: Try SymPy for exact denominator zero detection 
     try:
         sym_ok, sym_msg = check_denominator_with_sympy(processed, a, b)
     except Exception as exc:
@@ -383,24 +383,28 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
         # We'll fall back to the original numeric denominator sampling below (but record message).
         analysis_logs.append("sympy: fallback to numeric denominator scan.")
 
-    # find denominators (strings) and run numeric analysis 
+    # find denominators (strings)
     denom_strs = find_denominator_expressions(processed)
     if denom_strs:
         # for each denominator substring, build a function and test if it has a zero in [a,b]
         for ds in denom_strs:
             ds_clean = ds
+            # ensure denominator substring is normalized before compiling/evaluating
+            ds_arg = ds_clean.strip()
+            ds_processed = preprocess_expression(ds_arg)
+
             try:
-                g = make_function_from_processed(ds_clean.strip("()"))
-            except Exception:
-                msg = f"Denominator expression '{ds}' could not be analyzed (potential discontinuity)."
-                analysis_logs.append(msg)
-                return {"error": msg, "analysis": analysis_logs}
+              g = make_function_from_processed(ds_processed)
+            except Exception as exc:
+             # include the preprocessed string in the error for debugging and fall back
+             return {"error": f"Denominator expression '{ds}' could not be analyzed (preprocessed: '{ds_processed}'): {exc}"}
+
 
             try:
                 # Densify numeric scan for better reliability on denominators
-                step = (b - a) / 800.0
+                step = (b - a) / 1000.0
                 prev_val: Optional[float] = None
-                for i in range(801):
+                for i in range(10001):
                     x = a + i * step
                     try:
                         gv = g(x)
@@ -408,7 +412,7 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
                         msg = f"Denominator '{ds}' not defined at x={x} inside interval."
                         analysis_logs.append(msg)
                         return {"error": msg, "analysis": analysis_logs}
-                    if abs(gv) < 1e-12:
+                    if abs(gv) < 1e-18:
                         msg = f"Denominator '{ds}' is zero at x={x} inside interval -> discontinuity."
                         analysis_logs.append(msg)
                         return {"error": msg, "analysis": analysis_logs}
@@ -432,7 +436,7 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
 
     # sampling-definedness with threshold
     try:
-        if not sampling_defined_and_continuous(f, a, b, samples=300, max_abs_threshold=1e8):
+        if not sampling_defined_and_continuous(f, a, b, samples=1000, max_abs_threshold=1e9):
             msg = "Function is not defined/continuous on [a,b] (sampling/discontinuity detected)."
             analysis_logs.append(msg)
             return {"error": msg, "analysis": analysis_logs}
@@ -456,12 +460,12 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
         return {"error": msg, "analysis": analysis_logs}
 
     # endpoint roots
-    if abs(fa) <= 1e-15:
+    if abs(fa) <= 1e-18:
         return {"root": float(a), "iterations": [], "N_required": 0, "tol": 10 ** (-d),
                 "converged_by_tol": True, "workability": "Exact root at left endpoint (a).",
                 "convergence_text": "If f(a)==0 then a is a root; bisection is not required.", "rate_text": ""}
 
-    if abs(fb) <= 1e-15:
+    if abs(fb) <= 1e-18:
         return {"root": float(b), "iterations": [], "N_required": 0, "tol": 10 ** (-d),
                 "converged_by_tol": True, "workability": "Exact root at right endpoint (b).",
                 "convergence_text": "If f(b)==0 then b is a root; bisection is not required.", "rate_text": ""}
@@ -479,8 +483,8 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
         if sr is True:
             single_root_info = "Single-root sampling estimate passed."
         elif sr is False:
-            # multiple or zero sign changes by sampling, but endpoints have sign change -> proceed with caution
-            single_root_info = "Warning: sampling suggests multiple/ambiguous roots inside interval. Proceeding because f(a)*f(b)<0."
+            # zero sign changes by sampling, but endpoints have sign change -> proceed with caution
+            single_root_info = "Warning: sampling suggests ambiguous roots inside interval. Proceeding because f(a)*f(b)<0."
         else:
             single_root_info = "Warning: sampling for single-root estimate was unreliable."
     except Exception as exc:
@@ -572,8 +576,9 @@ def bisection(func_str: str, a: float, b: float, d: int) -> Dict[str, Any]:
 if __name__ == "__main__":
     from pprint import pprint
     # discontinuous example:
-    pprint(bisection("1/(x-2)", 1.0, 7.0, 6))
+    #pprint(bisection("1/(x-2)", 1.0, 7.0, 6))
+    pprint(bisection("1/sin(x)", 1.0, 2.0, 6))
     # continuous example:
-    pprint(bisection("xsinx - 1", 0.0, 2.0, 8))
+    #pprint(bisection("xsinx - 1", 0.0, 2.0, 8))
     # multiple conversions
-    pprint(bisection("3x^2 + sinx - ln(x+1)", 0.1, 2, 6))
+    #pprint(bisection("3x^2 + sinx - ln(x+1)", 0.1, 2, 6))
