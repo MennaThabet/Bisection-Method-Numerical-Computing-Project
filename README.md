@@ -47,62 +47,13 @@ This project goes beyond a basic numerical method implementation by carefully va
 ---
 
 ## 📁 Repository Structure
+├── bisection.py
+├── bisection_testing.py
+├── gui.py
+├── main.py
+├── utils.py
+└── README.md
 
-# Bisection Method Project
-
-A robust and educational implementation of the **Bisection Method** for finding roots of nonlinear equations, with strong emphasis on **correctness**, **workability checks**, and **clear diagnostics**.
-
-This project goes beyond a basic numerical method implementation by carefully validating mathematical assumptions such as **continuity**, **definedness**, and **denominator safety**, using both **symbolic** and **numeric** techniques.
-
----
-
-## ✨ Features
-
-- Intelligent **expression preprocessing**
-  - Converts user-friendly math input into valid Python expressions  
-  - Examples:
-    - `xsinx` → `x*sin(x)`
-    - `sinx` → `sin(x)`
-    - `3x` → `3*x`
-    - `4(x+1)` → `4*(x+1)`
-
-- **Safe function evaluation**
-  - Restricted evaluation environment
-  - Only math-safe functions are allowed
-  - Prevents arbitrary code execution
-
-- **Advanced workability checks**
-  - Symbolic denominator zero detection (using SymPy)
-  - Numeric fallback sampling for difficult cases
-  - Continuity and definedness verification
-  - Endpoint root detection
-  - Sign-change test
-  - Single-root heuristic (sampling-based)
-
-- **Guaranteed iteration count**
-  - Computes the required number of iterations using:
-    ```
-    N > (log10(b-a) - log10(0.5 * 10^-d)) / log10(2) - 1
-    ```
-
-- **GUI Interface**
-  - Built using `tkinter`
-  - Displays:
-    - Root approximation
-    - Iteration table
-    - Convergence explanation
-    - Diagnostic messages
-  - Scrollable summary and results table
-
----
-
-## 📁 Repository Structure
-   ├── bisection.py
-   ├── bisection_testing.py
-   ├── gui.py
-   ├── main.py
-   ├── utils.py
-   └── README.md
 
 
 ---
@@ -212,8 +163,11 @@ Only then does the algorithm proceed.
 ---
 
 ## 🎓 Educational Focus
-# This project is designed for:
+
+This project is designed for:
+
 - Numerical Analysis courses
 - Algorithm correctness discussions
 - Demonstrating the gap between theory and implementation
-- Understanding why checks matter before algorithms
+- Understanding **why checks matter before algorithms**
+
